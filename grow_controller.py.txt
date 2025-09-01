@@ -5,6 +5,12 @@ import time
 import board
 import adafruit_scd4x
 
+# --- Relay State Definitions for Low-Level Trigger ---
+# A LOW signal turns the relay ON
+# A HIGH signal turns the relay OFF
+RELAY_ON = GPIO.LOW
+RELAY_OFF = GPIO.HIGH
+
 # 1. --- Hardware GPIO Assignments ---
 OUTSIDE_FAN_PIN = 27
 INSIDE_FAN_PIN = 22
@@ -22,9 +28,10 @@ GPIO.setup(OUTSIDE_FAN_PIN, GPIO.OUT)
 GPIO.setup(INSIDE_FAN_PIN, GPIO.OUT)
 GPIO.setup(HUMIDIFIER_PIN, GPIO.OUT)
 
-GPIO.output(OUTSIDE_FAN_PIN, GPIO.LOW)
-GPIO.output(INSIDE_FAN_PIN, GPIO.LOW)
-GPIO.output(HUMIDIFIER_PIN, GPIO.LOW)
+# Set all relays to the OFF state initially
+GPIO.output(OUTSIDE_FAN_PIN, RELAY_OFF)
+GPIO.output(INSIDE_FAN_PIN, RELAY_OFF)
+GPIO.output(HUMIDIFIER_PIN, RELAY_OFF)
 
 is_humidifying = False
 is_venting_co2 = False
@@ -44,30 +51,33 @@ try:
             print(f"Humidity: {humidity:.1f} %")
             print("--------------------")
 
+            # --- Humidity Logic ---
             if humidity < 85:
                 is_humidifying = True
             elif humidity >= 95:
                 is_humidifying = False
 
+            # --- CO2 Logic ---
             if co2 > 800:
                 is_venting_co2 = True
             elif co2 <= 700:
                 is_venting_co2 = False
 
+            # --- Apply Relay States ---
             if is_humidifying:
-                GPIO.output(HUMIDIFIER_PIN, GPIO.HIGH)
+                GPIO.output(HUMIDIFIER_PIN, RELAY_ON)
             else:
-                GPIO.output(HUMIDIFIER_PIN, GPIO.LOW)
+                GPIO.output(HUMIDIFIER_PIN, RELAY_OFF)
 
             if is_venting_co2:
-                GPIO.output(OUTSIDE_FAN_PIN, GPIO.HIGH)
+                GPIO.output(OUTSIDE_FAN_PIN, RELAY_ON)
             else:
-                GPIO.output(OUTSIDE_FAN_PIN, GPIO.LOW)
+                GPIO.output(OUTSIDE_FAN_PIN, RELAY_OFF)
 
             if is_humidifying or is_venting_co2:
-                GPIO.output(INSIDE_FAN_PIN, GPIO.HIGH)
+                GPIO.output(INSIDE_FAN_PIN, RELAY_ON)
             else:
-                GPIO.output(INSIDE_FAN_PIN, GPIO.LOW)
+                GPIO.output(INSIDE_FAN_PIN, RELAY_OFF)
 
         time.sleep(10)
 
