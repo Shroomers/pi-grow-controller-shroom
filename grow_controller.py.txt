@@ -11,10 +11,10 @@ import adafruit_scd4x
 RELAY_ON = GPIO.HIGH
 RELAY_OFF = GPIO.LOW
 
-# 1. --- Hardware GPIO Assignments ---
-OUTSIDE_FAN_PIN = 27
-INSIDE_FAN_PIN = 22
-HUMIDIFIER_PIN = 23
+# 1. --- Hardware GPIO Assignments (Mapped to Physical Relays) ---
+OUTSIDE_FAN_PIN = 27  # Connected to IN4
+INSIDE_FAN_PIN = 22   # Connected to IN3
+HUMIDIFIER_PIN = 23   # Connected to IN2
 
 # 2. --- Sensor and GPIO Initialization ---
 i2c = board.I2C()
@@ -84,3 +84,4 @@ try:
 except KeyboardInterrupt:
     print("Stopping controller and cleaning up GPIO.")
     GPIO.cleanup()
+
