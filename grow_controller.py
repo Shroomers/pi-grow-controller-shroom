@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+# -- coding: utf-8 --
 """
 Grow tent controller (Lion's Mane) — fixed minimal version
-- Adds LOW_TRIGGERED_RELAYS flag (default: True)
-- Uses GPIO.setup(..., initial=RELAY_OFF) to prevent power-on pulses
-- Adds robust sensor read with try/except and None-guards
-- Adds explicit decision logging so you can see *why* it switches
-- Preserves your hysteresis logic and 10s loop cadence
+LOW_TRIGGERED_RELAYS flag (default: True)
+Safe GPIO init with initial=RELAY_OFF
+Robust sensor read with try/except and None-guards
+Explicit decision logging (why it switches)
+Preserves hysteresis logic and 10s loop cadence
 """
 
 import time
@@ -22,14 +22,29 @@ LOW_TRIGGERED_RELAYS = True
 RELAY_ON  = GPIO.LOW  if LOW_TRIGGERED_RELAYS else GPIO.HIGH
 RELAY_OFF = GPIO.HIGH if LOW_TRIGGERED_RELAYS else GPIO.LOW
 
-# GPIO pins (BCM numbering) — keep your existing mapping
-OUTSIDE_FAN_PIN = 27  # Exhaust / outside fan
-INSIDE_FAN_PIN  = 22  # Circulation / inside fan
-HUMIDIFIER_PIN  = 23  # Humidifier
+# -------------------- Pin Mapping Overview --------------------
+# Raspberry Pi is in BCM mode (GPIO.setmode(GPIO.BCM))
+# Relay board is LOW-triggered (set via LOW_TRIGGERED_RELAYS flag).
+#
+# Device          Relay IN   Pi BCM   Pi Physical Pin
+# ---------------------------------------------------
+# Outside fan  ->   IN2    ->  27   ->  Pin 13
+# Inside fan   ->   IN3    ->  22   ->  Pin 15
+# Humidifier   ->   IN4    ->  23   ->  Pin 16
+#
+# Notes:
+# - VCC relay board -> Pi 5V (pin 2 or 4)
+# - GND relay board -> Pi GND (pin 6/9/14/20/25/30/34/39)
+# - All grounds (Pi, relay board, sensors) must be common.
+# ---------------------------------------------------------------
+
+OUTSIDE_FAN_PIN = 27  # BCM27, physical pin 13, Relay IN2
+INSIDE_FAN_PIN  = 22  # BCM22, physical pin 15, Relay IN3
+HUMIDIFIER_PIN  = 23  # BCM23, physical pin 16, Relay IN4
 
 # Hysteresis thresholds
-RH_ON, RH_OFF     = 85.0, 95.0    # %RH: below RH_ON -> humidify; at/above RH_OFF -> stop humidifying
-CO2_ON, CO2_OFF   = 800, 700      # ppm: above CO2_ON -> vent; at/below CO2_OFF -> stop venting
+RH_ON, RH_OFF     = 85.0, 95.0    # %RH
+CO2_ON, CO2_OFF   = 800, 700      # ppm
 
 SLEEP_SECONDS = 10                # main loop cadence
 
@@ -37,7 +52,6 @@ SLEEP_SECONDS = 10                # main loop cadence
 GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
 
-# Ensure outputs start safe (OFF) to avoid unintended pulses at boot
 GPIO.setup(OUTSIDE_FAN_PIN, GPIO.OUT, initial=RELAY_OFF)
 GPIO.setup(INSIDE_FAN_PIN,  GPIO.OUT, initial=RELAY_OFF)
 GPIO.setup(HUMIDIFIER_PIN,  GPIO.OUT, initial=RELAY_OFF)
@@ -55,16 +69,15 @@ def apply_outputs():
     """Apply the current logical states to the GPIO pins and log changes."""
     GPIO.output(HUMIDIFIER_PIN, RELAY_ON if is_humidifying else RELAY_OFF)
     GPIO.output(OUTSIDE_FAN_PIN, RELAY_ON if is_venting else RELAY_OFF)
-    # Inside fan follows if any device is active
     inside_on = is_humidifying or is_venting
     GPIO.output(INSIDE_FAN_PIN, RELAY_ON if inside_on else RELAY_OFF)
 
 def print_actuation(reason: str):
-    print(f"[ACT] HUM={'ON' if is_humidifying else 'OFF'} | OUT={'ON' if is_venting else 'OFF'} | IN={'ON' if (is_humidifying or is_venting) else 'OFF'}  :: {reason}")
+    print(f"[ACT] HUM={'ON' if is_humidifying else 'OFF'} | OUT={'ON' if is_venting else 'OFF'} | "
+          f"IN={'ON' if (is_humidifying or is_venting) else 'OFF'}  :: {reason}")
 
 # -------------------- Main --------------------
 try:
-    # Wait for the first valid sample to arm the controller
     print("[INIT] Waiting for first SCD4x sample...")
     while True:
         try:
@@ -79,9 +92,8 @@ try:
         time.sleep(1)
     print("[INIT] Sensor OK, controller armed.")
 
-    apply_outputs()  # ensure outputs are off at start
+    apply_outputs()
     print_actuation("startup -> all OFF")
-
 
     while True:
         try:
@@ -90,7 +102,6 @@ try:
                 rh  = scd4x.relative_humidity
                 tc  = scd4x.temperature
 
-                # Guard against spurious None readings
                 if None in (co2, rh, tc):
                     raise ValueError("Sensor returned None value(s)")
 
@@ -115,7 +126,6 @@ try:
                     is_venting = False
                     print_actuation(f"[CO2] {int(co2)} ≤ {CO2_OFF} → VENT OFF")
 
-                # Apply outputs if any logical state changed
                 if (prev_humid != is_humidifying) or (prev_vent != is_venting):
                     apply_outputs()
 
