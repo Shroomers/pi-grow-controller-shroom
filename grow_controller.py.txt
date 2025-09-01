@@ -5,11 +5,11 @@ import time
 import board
 import adafruit_scd4x
 
-# --- Relay State Definitions for Low-Level Trigger ---
-# A LOW signal turns the relay ON
-# A HIGH signal turns the relay OFF
-RELAY_ON = GPIO.LOW
-RELAY_OFF = GPIO.HIGH
+# --- Relay State Definitions for High-Level Trigger ---
+# A HIGH signal turns the relay ON
+# A LOW signal turns the relay OFF
+RELAY_ON = GPIO.HIGH
+RELAY_OFF = GPIO.LOW
 
 # 1. --- Hardware GPIO Assignments ---
 OUTSIDE_FAN_PIN = 27
