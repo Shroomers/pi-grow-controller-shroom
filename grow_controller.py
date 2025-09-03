@@ -1,29 +1,32 @@
 #!/usr/bin/env python3
-# -- coding: utf-8 --
+# -*- coding: utf-8 -*-
 """
-Grow tent controller (Lion's Mane) — fixed minimal version
-LOW_TRIGGERED_RELAYS flag (default: True)
-Safe GPIO init with initial=RELAY_OFF
-Robust sensor read with try/except and None-guards
-Explicit decision logging (why it switches)
-Preserves hysteresis logic and 10s loop cadence
+Grow tent controller (Lion's Mane) — robust version with CSV logging
+Adds:
+- LOW_TRIGGERED_RELAYS flag (active-low relay support)
+- Safe GPIO init (initial=RELAY_OFF)
+- Robust sensor read (try/except + None-guard)
+- Timestamped logging for every message
+- Anti-chatter (minimum on/off times per output)
+- CO2 EMA smoothing + validity guard for actuation
+- CSV logging of every measurement + device states (telemetry.csv)
 """
 
 import time
+import datetime as dt
 import board
 import RPi.GPIO as GPIO
 import adafruit_scd4x
+import csv, os
 
 # -------------------- Config --------------------
-# Set to True if your relay board is LOW-triggered (most common)
 LOW_TRIGGERED_RELAYS = True
 
-# Derive relay drive levels from polarity
 RELAY_ON  = GPIO.LOW  if LOW_TRIGGERED_RELAYS else GPIO.HIGH
 RELAY_OFF = GPIO.HIGH if LOW_TRIGGERED_RELAYS else GPIO.LOW
 
 # -------------------- Pin Mapping Overview --------------------
-# Raspberry Pi is in BCM mode (GPIO.setmode(GPIO.BCM))
+# Raspberry Pi in BCM mode (GPIO.setmode(GPIO.BCM))
 # Relay board is LOW-triggered (set via LOW_TRIGGERED_RELAYS flag).
 #
 # Device          Relay IN   Pi BCM   Pi Physical Pin
@@ -33,20 +36,39 @@ RELAY_OFF = GPIO.HIGH if LOW_TRIGGERED_RELAYS else GPIO.LOW
 # Humidifier   ->   IN4    ->  23   ->  Pin 16
 #
 # Notes:
-# - VCC relay board -> Pi 5V (pin 2 or 4)
-# - GND relay board -> Pi GND (pin 6/9/14/20/25/30/34/39)
+# - Relay VCC -> Pi 5V (pin 2 or 4)
+# - Relay GND -> Pi GND (pin 6/9/14/20/25/30/34/39)
 # - All grounds (Pi, relay board, sensors) must be common.
 # ---------------------------------------------------------------
 
-OUTSIDE_FAN_PIN = 27  # BCM27, physical pin 13, Relay IN2
-INSIDE_FAN_PIN  = 22  # BCM22, physical pin 15, Relay IN3
-HUMIDIFIER_PIN  = 23  # BCM23, physical pin 16, Relay IN4
+OUTSIDE_FAN_PIN = 27
+INSIDE_FAN_PIN  = 22
+HUMIDIFIER_PIN  = 23
 
-# Hysteresis thresholds
-RH_ON, RH_OFF     = 85.0, 95.0    # %RH
-CO2_ON, CO2_OFF   = 800, 700      # ppm
+RH_ON, RH_OFF   = 85.0, 95.0     # %RH
+CO2_ON, CO2_OFF = 800, 700       # ppm
 
-SLEEP_SECONDS = 10                # main loop cadence
+SLEEP_SECONDS = 10
+
+MIN_ON_S  = 60
+MIN_OFF_S = 60
+
+CO2_EMA_ALPHA = 0.30
+CO2_MIN_VALID = 300
+CO2_MAX_VALID = 40000
+
+LOGFILE = "telemetry.csv"
+
+# -------------------- Helpers --------------------
+def log(msg: str) -> None:
+    ts = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
+
+def act_snapshot(reason: str, is_humidifying: bool, is_venting: bool) -> None:
+    inside_on = is_humidifying or is_venting
+    log(f"[ACT] HUM={'ON' if is_humidifying else 'OFF'} | "
+        f"OUT={'ON' if is_venting else 'OFF'} | "
+        f"IN={'ON' if inside_on else 'OFF'} :: {reason}")
 
 # -------------------- Hardware Setup --------------------
 GPIO.setmode(GPIO.BCM)
@@ -56,29 +78,59 @@ GPIO.setup(OUTSIDE_FAN_PIN, GPIO.OUT, initial=RELAY_OFF)
 GPIO.setup(INSIDE_FAN_PIN,  GPIO.OUT, initial=RELAY_OFF)
 GPIO.setup(HUMIDIFIER_PIN,  GPIO.OUT, initial=RELAY_OFF)
 
-# Track logical states (True = intended ON, regardless of relay polarity)
 is_venting = False
 is_humidifying = False
 
-# Sensor init
+last_change = {
+    HUMIDIFIER_PIN: 0.0,
+    OUTSIDE_FAN_PIN: 0.0,
+    INSIDE_FAN_PIN: 0.0,
+}
+phys_state = {
+    HUMIDIFIER_PIN: False,
+    OUTSIDE_FAN_PIN: False,
+    INSIDE_FAN_PIN: False,
+}
+
+def _set_pin(pin: int, want_on: bool) -> None:
+    now = time.monotonic()
+    cur = phys_state[pin]
+    if cur == want_on:
+        return
+    min_gap = MIN_ON_S if want_on else MIN_OFF_S
+    if now - last_change[pin] < min_gap:
+        return
+    GPIO.output(pin, RELAY_ON if want_on else RELAY_OFF)
+    phys_state[pin] = want_on
+    last_change[pin] = now
+    log(f"[ACT_HW] {'ON ' if want_on else 'OFF'} -> pin {pin}")
+
+def apply_outputs() -> None:
+    inside_on = is_humidifying or is_venting
+    _set_pin(HUMIDIFIER_PIN, is_humidifying)
+    _set_pin(OUTSIDE_FAN_PIN, is_venting)
+    _set_pin(INSIDE_FAN_PIN, inside_on)
+
+# -------------------- Sensor Setup --------------------
 i2c = board.I2C()
 scd4x = adafruit_scd4x.SCD4X(i2c)
 scd4x.start_periodic_measurement()
 
-def apply_outputs():
-    """Apply the current logical states to the GPIO pins and log changes."""
-    GPIO.output(HUMIDIFIER_PIN, RELAY_ON if is_humidifying else RELAY_OFF)
-    GPIO.output(OUTSIDE_FAN_PIN, RELAY_ON if is_venting else RELAY_OFF)
-    inside_on = is_humidifying or is_venting
-    GPIO.output(INSIDE_FAN_PIN, RELAY_ON if inside_on else RELAY_OFF)
-
-def print_actuation(reason: str):
-    print(f"[ACT] HUM={'ON' if is_humidifying else 'OFF'} | OUT={'ON' if is_venting else 'OFF'} | "
-          f"IN={'ON' if (is_humidifying or is_venting) else 'OFF'}  :: {reason}")
+# -------------------- CSV Setup --------------------
+new_file = not os.path.exists(LOGFILE)
+csv_file = open(LOGFILE, "a", newline="")
+csv_writer = csv.writer(csv_file)
+if new_file:
+    csv_writer.writerow([
+        "timestamp","co2_raw","co2_smooth","rh_pct","temp_c",
+        "humidifying","venting","inside_fan"
+    ])
 
 # -------------------- Main --------------------
 try:
-    print("[INIT] Waiting for first SCD4x sample...")
+    log("[INIT] Waiting for first SCD4x sample...")
+    co2_ema = None
+
     while True:
         try:
             if scd4x.data_ready:
@@ -86,57 +138,80 @@ try:
                 rh  = scd4x.relative_humidity
                 tc  = scd4x.temperature
                 if None not in (co2, rh, tc):
+                    co2_ema = float(co2)
                     break
         except Exception as e:
-            print(f"[INIT] sensor read error: {e}")
+            log(f"[INIT] sensor read error: {e}")
         time.sleep(1)
-    print("[INIT] Sensor OK, controller armed.")
 
+    log("[INIT] Sensor OK, controller armed.")
     apply_outputs()
-    print_actuation("startup -> all OFF")
+    act_snapshot("startup -> all OFF", is_humidifying, is_venting)
 
     while True:
         try:
             if scd4x.data_ready:
-                co2 = scd4x.CO2
-                rh  = scd4x.relative_humidity
-                tc  = scd4x.temperature
+                co2_raw = scd4x.CO2
+                rh      = scd4x.relative_humidity
+                tc      = scd4x.temperature
 
-                if None in (co2, rh, tc):
+                if None in (co2_raw, rh, tc):
                     raise ValueError("Sensor returned None value(s)")
 
-                tf = tc * 9/5 + 32
-                print(f"-- CO2:{int(co2)}ppm  RH:{rh:.1f}%  T:{tc:.1f}C/{tf:.1f}F")
+                co2_ema = (CO2_EMA_ALPHA * co2_raw) + ((1 - CO2_EMA_ALPHA) * co2_ema)
 
-                # --- Humidity control with hysteresis ---
+                tf = tc * 9/5 + 32
+                log(f"-- CO2_raw:{int(co2_raw)}ppm  CO2_smooth:{int(co2_ema)}ppm  "
+                    f"RH:{rh:.1f}%  T:{tc:.1f}C/{tf:.1f}F")
+
+                co2_valid_for_act = (CO2_MIN_VALID <= co2_ema <= CO2_MAX_VALID)
+
                 prev_humid = is_humidifying
                 if rh < RH_ON and not is_humidifying:
                     is_humidifying = True
-                    print_actuation(f"[RH] {rh:.1f}% < {RH_ON:.1f}% → HUM ON")
+                    act_snapshot(f"[RH] {rh:.1f}% < {RH_ON:.1f}% → HUM ON",
+                                 is_humidifying, is_venting)
                 elif rh >= RH_OFF and is_humidifying:
                     is_humidifying = False
-                    print_actuation(f"[RH] {rh:.1f}% ≥ {RH_OFF:.1f}% → HUM OFF")
+                    act_snapshot(f"[RH] {rh:.1f}% ≥ {RH_OFF:.1f}% → HUM OFF",
+                                 is_humidifying, is_venting)
 
-                # --- CO2 control with hysteresis ---
                 prev_vent = is_venting
-                if co2 > CO2_ON and not is_venting:
-                    is_venting = True
-                    print_actuation(f"[CO2] {int(co2)} > {CO2_ON} → VENT ON")
-                elif co2 <= CO2_OFF and is_venting:
-                    is_venting = False
-                    print_actuation(f"[CO2] {int(co2)} ≤ {CO2_OFF} → VENT OFF")
+                if co2_valid_for_act:
+                    if co2_ema > CO2_ON and not is_venting:
+                        is_venting = True
+                        act_snapshot(f"[CO2] {int(co2_ema)} > {CO2_ON} → VENT ON",
+                                     is_humidifying, is_venting)
+                    elif co2_ema <= CO2_OFF and is_venting:
+                        is_venting = False
+                        act_snapshot(f"[CO2] {int(co2_ema)} ≤ {CO2_OFF} → VENT OFF",
+                                     is_humidifying, is_venting)
+                else:
+                    log(f"[CO2] reading {int(co2_ema)}ppm ignored for actuation "
+                        f"(valid {CO2_MIN_VALID}-{CO2_MAX_VALID})")
 
                 if (prev_humid != is_humidifying) or (prev_vent != is_venting):
                     apply_outputs()
 
+                # --- CSV logging ---
+                inside_on = is_humidifying or is_venting
+                csv_writer.writerow([
+                    dt.datetime.now().isoformat(timespec="seconds"),
+                    int(co2_raw), int(co2_ema), f"{rh:.1f}", f"{tc:.1f}",
+                    int(is_humidifying), int(is_venting), int(inside_on)
+                ])
+                csv_file.flush()
+
         except Exception as e:
-            print(f"[LOOP] error: {e}")
+            log(f"[LOOP] error: {e}")
 
         time.sleep(SLEEP_SECONDS)
 
 except KeyboardInterrupt:
-    print("Stopping controller and cleaning up GPIO.")
+    log("Stopping controller and cleaning up GPIO.")
     GPIO.cleanup()
+    csv_file.close()
 except Exception as e:
-    print(f"[FATAL] {e}")
+    log(f"[FATAL] {e}")
     GPIO.cleanup()
+    csv_file.close()
